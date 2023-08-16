@@ -1,119 +1,136 @@
-import os
-import time
-import schedule
-import RPi.GPIO as GPIO
 from google.cloud import storage
-from google.auth.transport.requests import Request
-from google.auth.transport import grpc
-from google.auth.credentials import Credentials
-from googleapiclient.discovery import build
-import requests
-from flask import Flask, render_template, request, redirect, url_for
+import cv2
+import time
+import RPi.GPIO as GPIO
 
-app = Flask(__name__)
+# capture video var
+video_duration = 5
+filename_temp = time.time()
+output_file = "./videos/video_"+str(filename_temp)+".mp4"
 
-# Fungsi untuk mengirimkan permintaan prediksi ke model di Vertex AI menggunakan Interface Online Prediction
+# upload video var
+bucket_name = "sff-fish-video"
+destination_blob_name = "video_"+str(filename_temp)+".mp4"
+
+# video extraction var
+image_shape = (200, 200)
+sequence_length = 50
+
+# move servo var
+servo_pin = 12
+led_a_pin = 17
+led_b_pin = 27
+
+
+def capture_video(duration, output_file):
+    cap = cv2.VideoCapture(0)
+    fourcc = cv2.VideoWriter_fourcc('m', 'p', '4', 'v')
+    out = cv2.VideoWriter(output_file, fourcc, 10.0, (640, 480))
+    start_time = time.time()
+
+    while time.time() - start_time < duration:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        out.write(frame)
+
+    cap.release()
+    out.release()
+
+
+def upload_video(video_path, bucket_name, destination_blob_name):
+    storage_client = storage.Client()
+    bucket = storage_client.get_bucket(bucket_name)
+    blob = bucket.blob(destination_blob_name)
+    blob.upload_from_filename(video_path)
+
+    video_gcs_url = f'gs://{bucket_name}/{destination_blob_name}'
+    return video_gcs_url
+
+
+def extract_video_frames(video_path):
+    print(f'Extracting {video_path}')
+    frames = []
+    video_reader = cv2.VideoCapture(video_path)
+    for frame_count in range(sequence_length):
+        video_reader.set(cv2.CAP_PROP_POS_FRAMES, frame_count)
+        success, frame = video_reader.read()
+        if not success:
+            print(f'Fail : {video_path}')
+            break
+        resized_frame = cv2.resize(frame, image_shape)
+        normalized_frame = np.float32(resized_frame/255)
+        frames.append(normalized_frame)
+    video_reader.release()
+    return frames
+
+
 def send_prediction_request(video_gcs_url, model_name, token, pond_id):
-  credentials, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
-  request = google.auth.transport.requests.Request()
-  credentials.refresh(request)
-  request = google.auth.transport.grpc.Request(request)
-  http_request = google.auth.transport.grpc.AuthorizedHttp(credentials)
-  service = build('ml', 'v1', http=http_request)
-  name = f'projects/YOUR_PROJECT_ID/locations/YOUR_REGION/models/{model_name}'
-  payload = {
-    'instances': [
-      {
-        'input_uri': video_gcs_url,
-        'pond_id': pond_id,
-      }
-    ]
-  }
-  parent = f'projects/YOUR_PROJECT_ID/locations/YOUR_REGION'
-  response = service.projects().predict(name=name, body=payload).execute()
-  return response['predictions']
+    headers = {
+        'Authorization': f'Bearer {token}',
+        'Content-Type': 'application/json'
+    }
 
-# Fungsi untuk menggerakkan servo berdasarkan hasil prediksi
+    data = {
+        'instances': [
+            {
+                'video_url': video_gcs_url,
+                'pond_id': pond_id
+            }
+        ]
+    }
+
+    prediction_url = f'https://ml.googleapis.com/v1/projects/your_project_id/models/{model_name}:predict'
+    response = requests.post(prediction_url, headers=headers, json=data)
+
+    if response.status_code == 200:
+        prediction_data = response.json()
+        return prediction_data['predictions']
+    else:
+        print(
+            f"Failed to get predictions. Status code: {response.status_code}")
+        return []
+
+
 def move_servo():
-    # ... (kode untuk menggerakkan servo seperti yang telah dijelaskan sebelumnya)
+    GPIO.setmode(GPIO.BCM)
 
-# Fungsi untuk menyimpan token dan pond id dalam file .env
-def save_token_and_pond_id(token, pond_id):
-  # Simpan token ke dalam file .env
-  with open('.env', 'w') as env_file:
-    env_file.write(f'TOKEN={token}\n')
-    env_file.write(f'POND_ID={pond_id}')
+    GPIO.setup(servo_pin, GPIO.OUT)
+    GPIO.setup(led_a_pin, GPIO.OUT)
+    GPIO.setup(led_b_pin, GPIO.OUT)
 
-# Fungsi untuk membaca token dan pond id dari file .env
-def get_token_and_pond_id():
-  # Baca token dan pond id dari file .env
-  with open('.env', 'r') as env_file:
-    env_lines = env_file.readlines()
-    for line in env_lines:
-      key, value = line.strip().split('=')
-      if key == 'TOKEN':
-        token = value
-      elif key == 'POND_ID':
-        pond_id = value
+    servo = GPIO.PWM(servo_pin, 50)  # Frekuensi PWM 50 Hz
+    servo.start(0)
 
-  return token, pond_id
+    def set_servo_angle(angle):
+        # Menghitung duty cycle berdasarkan sudut
+        duty_cycle = 2 + (angle / 18)
+        servo.ChangeDutyCycle(duty_cycle)
+        time.sleep(0.5)  # Tunggu sebentar untuk servo mencapai posisi
 
-# Fungsi untuk mengambil video, mengunggah ke GCS, dan melakukan permintaan prediksi
-def capture_and_upload_video():
-    # ... (kode untuk mengambil video dan mengunggah ke GCS seperti yang telah dijelaskan sebelumnya)
+    angle = 0
 
-  # Jika token belum ada atau pond id belum diatur, minta user untuk login dan mengatur pond id melalui website
-  if not os.path.exists('.env'):
-      # Implementasikan kode untuk menjalankan website sederhana untuk login dan mengatur pond id
-      # Gunakan library Flask atau Django untuk membuat web server di Raspberry Pi
+    try:
+        while True:
+            angle += 90
+            set_servo_angle(angle)     # Putar ke posisi 0 derajat
+            if (angle % 180 == 0):
+                GPIO.output(led_a_pin, 1)
+                GPIO.output(led_b_pin, 0)
+            else:
+                GPIO.output(led_a_pin, 0)
+                GPIO.output(led_b_pin, 1)
 
-      # Setelah user berhasil login dan mengatur pond id, simpan token dan pond id
-      token = 'your_jwt_token'  # Ganti dengan token yang didapatkan setelah login
-      pond_id = 'your_pond_id'  # Ganti dengan pond id yang diatur oleh user
+            time.sleep(1)
+    except KeyboardInterrupt:
+        servo.stop()
+        GPIO.cleanup()
 
-      save_token_and_pond_id(token, pond_id)
 
-  # Jika token dan pond id sudah ada, baca dari file .env
-  token, pond_id = get_token_and_pond_id()
+def main():
+    capture_video(video_duration, output_file)
+    testUpload = upload_video(output_file, bucket_name, destination_blob_name)
+    print(testUpload)
 
-  # Ganti 'your_model_name' dengan nama model yang telah diunggah ke Vertex AI
-  model_name = 'your_model_name'
 
-  # Kirim permintaan prediksi ke model dengan menyertakan token dan pond id
-  prediction_data = send_prediction_request(gcs_video_url, model_name, token, pond_id)
-
-  # Lakukan tindakan berdasarkan hasil prediksi
-  for prediction in prediction_data:
-      if prediction['condition'] == 'pemberian_pakan':
-          # Jika hasil prediksi menunjukkan kondisi pemberian pakan, gerakkan servo
-          move_servo()
-      else:
-          # Jika hasil prediksi tidak menunjukkan kondisi pemberian pakan, biarkan servo dalam keadaan idle
-
-if __name__ == '__main__':
-    # ... (kode untuk pengaturan GPIO seperti yang telah dijelaskan sebelumnya)
-
-    # Ganti 'your_video_path' dengan path tempat menyimpan video di Raspberry Pi
-    video_path = 'your_video_path'
-
-    # Ganti 'your_gcs_bucket' dengan nama bucket GCS tujuan
-    # Ganti 'your_gcs_blob_name' dengan nama blob/file di dalam GCS
-    gcs_bucket = 'your_gcs_bucket'
-    gcs_blob_name = 'your_gcs_blob_name'
-
-    # Ganti 'your_servo_pin' dengan nomor pin GPIO yang terhubung ke servo
-    your_servo_pin = 17
-
-    # Ganti 'your_servo_position' dengan posisi servo yang ingin diatur
-    # Anda dapat menyesuaikan nilai ini berdasarkan posisi yang sesuai untuk memberikan pakan atau posisi idle
-    your_servo_position = 7.5
-
-    # Ganti 'your_api_endpoint' dengan URL endpoint API Anda yang akan menyimpan hasil prediksi
-    your_api_endpoint = 'your_api_endpoint'
-
-    # Jadwal pengambilan video dan pengiriman ke GCS setiap 3 jam sekali (sesuai kebutuhan)
-    schedule.every(3).hours.do(capture_and_upload_video)
-
-    while True:
-        schedule.run_pending()
-        time.sleep(1)
+main()
