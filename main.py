@@ -201,14 +201,14 @@ def feeding_action():
     print("Predicting fish condition...")
     prediction_result = send_prediction(features)
     print(f"Fish condition predicted successfully\nPrediction result is {prediction_result}")
-    if prediction_result > 0.4967227:
+    if prediction_result > 0.4938:
         is_hungry = True
         update_prediction(is_hungry)
         print(f"Fish hungry condition is {is_hungry}\n")
         print("Feeding fish with type feeding")
         move_servo("feeding")
         print("Feeding Completed. Upcoming feeding testing in 5 minutes")
-        time.sleep(30)
+        time.sleep(15)
         feeding_action()
     else:
         is_hungry = False
@@ -224,7 +224,7 @@ if __name__ == "__main__":
     print("Initializing feeder...\n")
     time.sleep(3)
     print("Feeder initialized. Upcoming feeding testing in 180 minutes")
-    schedule.every(2).minutes.do(feeding_action)
+    schedule.every(1).minutes.do(feeding_action)
     while True:
         schedule.run_pending()
         time.sleep(1)
